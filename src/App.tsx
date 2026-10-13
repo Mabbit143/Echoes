@@ -9,7 +9,11 @@ import { GeminiMapsDiscoveryModal } from './components/GeminiMapsDiscoveryModal'
 import { TimeTravelSlider } from './components/TimeTravelSlider';
 import { WhisperInviteModal } from './components/WhisperInviteModal';
 import { IncomingWhisperInviteBanner } from './components/IncomingWhisperInviteBanner';
+import { OnboardingOverlay } from './components/OnboardingOverlay';
+import { EchoDensityModal } from './components/EchoDensityModal';
 import { soundSynth } from './utils/audioSynth';
+import { DEFAULT_ECHOES } from './data/defaultEchoes';
+import { safeFetchJson } from './utils/apiClient';
 import {
   Radio,
   Plus,
@@ -24,6 +28,9 @@ import {
   Info,
   Lock,
   Send,
+  HelpCircle,
+  BarChart2,
+  ChevronDown,
 } from 'lucide-react';
 
 const MAX_NOTIFICATIONS_PER_ZONE = 3;
@@ -39,7 +46,23 @@ const TELEPORT_ZONES = [
 ];
 
 export default function App() {
-  const [echoes, setEchoes] = useState<EchoItem[]>([]);
+  const [echoes, setEchoes] = useState<EchoItem[]>(() => {
+    try {
+      const cached = localStorage.getItem('echoes_cached_data');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return DEFAULT_ECHOES;
+  });
+  const [isLoadingEchoes, setIsLoadingEchoes] = useState<boolean>(false);
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'reconnecting' | 'offline'>('connected');
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [selectedEcho, setSelectedEcho] = useState<EchoItem | null>(null);
   const [radarTargetEcho, setRadarTargetEcho] = useState<EchoItem | null>(null);
   const [activeFilter, setActiveFilter] = useState<EchoType | 'all'>('all');
@@ -59,6 +82,9 @@ export default function App() {
     lng: -123.0182,
   });
   const [isExploreModalOpen, setIsExploreModalOpen] = useState<boolean>(false);
+  const [isDensityModalOpen, setIsDensityModalOpen] = useState<boolean>(false);
+  const [isZoneMenuOpen, setIsZoneMenuOpen] = useState<boolean>(false);
+  const [isToolsMenuOpen, setIsToolsMenuOpen] = useState<boolean>(false);
   const [activeAlert, setActiveAlert] = useState<ProximityAlert | null>(null);
 
   // Whisper Engine: Invitation states
@@ -70,6 +96,41 @@ export default function App() {
   } | null>(null);
   const [activeInviteKey, setActiveInviteKey] = useState<string | undefined>(undefined);
 
+  // Interactive Onboarding Tour state (launches automatically on first visit)
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(() => {
+    try {
+      return !localStorage.getItem('echoes_has_seen_onboarding');
+    } catch {
+      return false;
+    }
+  });
+
+  const handleCloseOnboarding = () => {
+    setIsOnboardingOpen(false);
+    try {
+      localStorage.setItem('echoes_has_seen_onboarding', 'true');
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleOnboardingAction = (actionType: string) => {
+    if (actionType === 'open-drop') {
+      setDropCoordinates(userLocation);
+      setIsDropModalOpen(true);
+      handleCloseOnboarding();
+    } else if (actionType === 'toggle-history') {
+      setIsHistoricalMode((prev) => !prev);
+      if (!isHistoricalMode) {
+        setTimeSliderYear(1892);
+      }
+    } else if (actionType === 'open-density') {
+      setIsDensityModalOpen(true);
+      soundSynth.playZoneAlertChime();
+      handleCloseOnboarding();
+    }
+  };
+
   // Zone Notification Anti-fatigue history { [zoneName]: count }
   const [zoneAlertCounts, setZoneAlertCounts] = useState<Record<string, number>>(() => {
     try {
@@ -80,17 +141,30 @@ export default function App() {
     }
   });
 
-  // Load Echoes from server
-  const fetchEchoes = async () => {
-    try {
-      const res = await fetch('/api/echoes');
-      const data = await res.json();
-      if (data.echoes && Array.isArray(data.echoes)) {
-        setEchoes(data.echoes);
-        checkUrlInvite(data.echoes);
+  // Load Echoes from server with offline cache fallback and auto-recovery
+  const fetchEchoes = async (isManual = false) => {
+    if (isManual) {
+      setIsLoadingEchoes(true);
+      setConnectionStatus('reconnecting');
+    }
+
+    const result = await safeFetchJson<{ success: boolean; echoes: EchoItem[] }>('/api/echoes');
+    setIsLoadingEchoes(false);
+
+    if (result.ok && result.data?.echoes && Array.isArray(result.data.echoes)) {
+      setEchoes(result.data.echoes);
+      setConnectionStatus('connected');
+      setSyncNotice(null);
+      try {
+        localStorage.setItem('echoes_cached_data', JSON.stringify(result.data.echoes));
+      } catch {
+        // ignore
       }
-    } catch (e) {
-      console.error('Failed to load Echoes:', e);
+      checkUrlInvite(result.data.echoes);
+    } else {
+      console.warn('API sync unavailable, running on local/cached archives:', result.error);
+      setConnectionStatus('offline');
+      setSyncNotice('Operating in offline cache mode. Oregon archives preserved.');
     }
   };
 
@@ -225,6 +299,27 @@ export default function App() {
     triggerZoneEvaluation({ lat: zone.lat, lng: zone.lng }, zone.name);
   };
 
+  // Get user's real browser GPS coordinates
+  const handleGetDeviceGps = () => {
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const newLoc = {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+          };
+          setUserLocation(newLoc);
+          triggerZoneEvaluation(newLoc, 'My Current Location');
+          soundSynth.playZoneAlertChime();
+        },
+        (err) => {
+          console.warn('Geolocation error:', err);
+        },
+        { enableHighAccuracy: true }
+      );
+    }
+  };
+
   // Map Click handler in Drop Mode
   const handleMapClickForDrop = (lat: number, lng: number) => {
     if (isDropMode) {
@@ -236,46 +331,46 @@ export default function App() {
 
   // React (+1 Resonance)
   const handleReactEcho = async (echoId: string) => {
-    try {
-      await fetch(`/api/echoes/${echoId}/react`, { method: 'POST' });
-      setEchoes((prev) =>
-        prev.map((e) => (e.id === echoId ? { ...e, resonanceScore: e.resonanceScore + 1 } : e))
-      );
-    } catch {
-      // ignore
-    }
+    // Optimistic UI update
+    setEchoes((prev) =>
+      prev.map((e) => (e.id === echoId ? { ...e, resonanceScore: e.resonanceScore + 1 } : e))
+    );
+    await safeFetchJson(`/api/echoes/${echoId}/react`, { method: 'POST' });
   };
 
   // Colab Engine: Upvote/downvote parent pin
   const handleVotePin = async (echoId: string, direction: 'up' | 'down') => {
-    try {
-      const res = await fetch(`/api/echoes/${echoId}/vote`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ direction }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setEchoes((prev) =>
-          prev.map((e) =>
-            e.id === echoId
-              ? {
-                  ...e,
-                  resonanceScore: data.resonanceScore,
-                  upvotes: data.upvotes,
-                  downvotes: data.downvotes,
-                }
-              : e
-          )
+    const result = await safeFetchJson<{
+      success: boolean;
+      resonanceScore: number;
+      upvotes: number;
+      downvotes: number;
+    }>(`/api/echoes/${echoId}/vote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ direction }),
+    });
+
+    if (result.ok && result.data?.success) {
+      setEchoes((prev) =>
+        prev.map((e) =>
+          e.id === echoId
+            ? {
+                ...e,
+                resonanceScore: result.data!.resonanceScore,
+                upvotes: result.data!.upvotes,
+                downvotes: result.data!.downvotes,
+              }
+            : e
+        )
+      );
+      if (selectedEcho && selectedEcho.id === echoId) {
+        setSelectedEcho((prev) =>
+          prev ? { ...prev, resonanceScore: result.data!.resonanceScore } : null
         );
-        if (selectedEcho && selectedEcho.id === echoId) {
-          setSelectedEcho((prev) =>
-            prev ? { ...prev, resonanceScore: data.resonanceScore } : null
-          );
-        }
       }
-    } catch (err) {
-      console.error('Failed to vote pin:', err);
+    } else {
+      console.warn('Failed to vote pin:', result.error);
     }
   };
 
@@ -316,30 +411,33 @@ export default function App() {
     contribId: string,
     direction: 'up' | 'down'
   ) => {
-    try {
-      const res = await fetch(`/api/echoes/${echoId}/contributions/${contribId}/vote`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ direction }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setEchoes((prev) =>
-          prev.map((e) => {
-            if (e.id === echoId && e.contributions) {
-              const updated = e.contributions.map((c) =>
-                c.id === contribId
-                  ? { ...c, upvotes: data.upvotes, downvotes: data.downvotes }
-                  : c
-              );
-              return { ...e, contributions: updated, resonanceScore: data.echoResonanceScore };
-            }
-            return e;
-          })
-        );
-      }
-    } catch (err) {
-      console.error('Failed to vote contribution:', err);
+    const result = await safeFetchJson<{
+      success: boolean;
+      upvotes: number;
+      downvotes: number;
+      echoResonanceScore: number;
+    }>(`/api/echoes/${echoId}/contributions/${contribId}/vote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ direction }),
+    });
+
+    if (result.ok && result.data?.success) {
+      setEchoes((prev) =>
+        prev.map((e) => {
+          if (e.id === echoId && e.contributions) {
+            const updated = e.contributions.map((c) =>
+              c.id === contribId
+                ? { ...c, upvotes: result.data!.upvotes, downvotes: result.data!.downvotes }
+                : c
+            );
+            return { ...e, contributions: updated, resonanceScore: result.data!.echoResonanceScore };
+          }
+          return e;
+        })
+      );
+    } else {
+      console.warn('Failed to vote contribution:', result.error);
     }
   };
 
@@ -361,86 +459,156 @@ export default function App() {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-slate-950 font-sans text-slate-100 select-none">
-      {/* 1. TOP HEADER / APP BAR */}
+      {/* Backdrop click dismisser for open menus */}
+      {(isZoneMenuOpen || isToolsMenuOpen) && (
+        <div
+          className="fixed inset-0 z-[950] bg-transparent"
+          onClick={() => {
+            setIsZoneMenuOpen(false);
+            setIsToolsMenuOpen(false);
+          }}
+        />
+      )}
+
+      {/* 1. CLEAN TOP APP BAR */}
       <header className="absolute top-0 inset-x-0 z-[1000] p-3 sm:p-4 pointer-events-none">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2.5">
-          {/* Logo & Zone Info */}
-          <div className="pointer-events-auto flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 px-3.5 py-2 rounded-2xl shadow-xl backdrop-blur-xl">
-            <div className="relative flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-cyan-500 to-amber-400 text-slate-950 font-bold shadow-md shadow-cyan-500/20">
-              <Radio className="w-4 h-4 animate-pulse" />
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 pointer-events-auto">
+          {/* Left Zone: Brand & Neighborhood Picker */}
+          <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800/90 rounded-2xl p-1.5 shadow-xl backdrop-blur-xl">
+            <div className="flex items-center gap-2 pl-2 pr-1">
+              <span className="font-bold tracking-tight text-white text-sm">Echoes</span>
+              {isHistoricalMode ? (
+                <span className="text-[10px] text-amber-400 font-medium">· Archival</span>
+              ) : (
+                <span className="text-[11px] text-slate-400 font-normal hidden lg:inline">· Living Map</span>
+              )}
             </div>
 
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-sm font-black tracking-tight text-white uppercase">
-                  Echoes
-                </h1>
-                <span className="text-[10px] text-cyan-300 font-bold px-1.5 py-0.2 rounded bg-cyan-950 border border-cyan-800">
-                  The Human Map
-                </span>
-                {isHistoricalMode && (
-                  <span className="text-[10px] text-amber-300 font-bold px-1.5 py-0.2 rounded bg-amber-950 border border-amber-800 animate-pulse">
-                    Archival View
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
+            {/* Quick Zone Dropdown */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setIsZoneMenuOpen(!isZoneMenuOpen);
+                  setIsToolsMenuOpen(false);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-cyan-300 text-xs font-medium border border-slate-700/60 transition-colors cursor-pointer"
+                title="Jump to another neighborhood"
+              >
                 <MapPin className="w-3 h-3 text-cyan-400" />
-                <span className="font-semibold text-white truncate max-w-[140px] sm:max-w-xs">
-                  {activeZoneName}
-                </span>
-                <span className="text-slate-500">•</span>
-                <span className="text-slate-400 font-mono text-[10px]">
-                  Alerts: {zoneAlertCounts[activeZoneName] || 0}/{MAX_NOTIFICATIONS_PER_ZONE}
-                </span>
-              </div>
+                <span className="max-w-[130px] sm:max-w-none truncate">{activeZoneName}</span>
+                <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isZoneMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isZoneMenuOpen && (
+                <div className="absolute top-full left-0 mt-2 w-64 bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-2xl backdrop-blur-2xl p-2 z-[1050] animate-in fade-in slide-in-from-top-2">
+                  <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 border-b border-slate-800 mb-1 flex items-center justify-between">
+                    <span>Teleport Neighborhood</span>
+                    <button
+                      onClick={() => {
+                        setZoneAlertCounts({});
+                        soundSynth.playZoneAlertChime();
+                        triggerZoneEvaluation(userLocation, activeZoneName);
+                      }}
+                      className="text-[10px] text-slate-500 hover:text-cyan-400 cursor-pointer"
+                      title="Reset notification limit"
+                    >
+                      Reset quota
+                    </button>
+                  </div>
+                  <div className="space-y-0.5">
+                    {TELEPORT_ZONES.map((zone) => {
+                      const zoneCount = echoes.filter((e) => e.zone === zone.name).length;
+                      return (
+                        <button
+                          key={zone.name}
+                          onClick={() => {
+                            handleTeleportToZone(zone);
+                            soundSynth.playZoneAlertChime();
+                            setIsZoneMenuOpen(false);
+                          }}
+                          className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs flex items-center justify-between transition-colors cursor-pointer ${
+                            activeZoneName === zone.name
+                              ? 'bg-cyan-950 text-cyan-300 font-semibold'
+                              : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                          }`}
+                        >
+                          <div>
+                            <div>{zone.name}</div>
+                            <div className="text-[10px] text-slate-500 font-normal">{zone.label}</div>
+                          </div>
+                          {zoneCount > 0 && (
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              {zoneCount} echoes
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Quick Action Buttons */}
-          <div className="pointer-events-auto flex items-center gap-2">
-            {/* Real Device GPS Tracking Button */}
+          {/* Center Zone: Segmented Category Filter */}
+          <div className="hidden md:flex items-center gap-1 bg-slate-900/90 border border-slate-800/90 p-1 rounded-2xl shadow-xl backdrop-blur-xl">
             <button
-              onClick={() => {
-                if ('geolocation' in navigator) {
-                  navigator.geolocation.getCurrentPosition(
-                    (pos) => {
-                      const newLoc = {
-                        lat: pos.coords.latitude,
-                        lng: pos.coords.longitude,
-                      };
-                      setUserLocation(newLoc);
-                      triggerZoneEvaluation(newLoc, 'My Current Location');
-                      soundSynth.playZoneAlertChime();
-                    },
-                    (err) => {
-                      console.warn('Geolocation error:', err);
-                    },
-                    { enableHighAccuracy: true }
-                  );
-                }
-              }}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700 text-slate-200 hover:text-cyan-300 text-xs font-bold shadow-lg backdrop-blur-xl transition-all hover:scale-105"
-              title="Use your phone's real GPS coordinates"
+              onClick={() => setActiveFilter('all')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+                activeFilter === 'all'
+                  ? 'bg-slate-800 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
             >
-              <LocateFixed className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="hidden sm:inline">Use My Real GPS</span>
-              <span className="sm:hidden">GPS</span>
+              All ({echoes.length})
             </button>
-
-            {/* Grounding Explorer Button */}
             <button
-              onClick={() => setIsExploreModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-cyan-500/40 text-cyan-300 text-xs font-bold shadow-lg backdrop-blur-xl transition-all hover:scale-105"
-              title="Ground new landmarks using Google Maps & Gemini"
+              onClick={() => setActiveFilter('whisper')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+                activeFilter === 'whisper'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                  : 'text-slate-400 hover:text-cyan-300'
+              }`}
             >
-              <Globe className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="hidden sm:inline">Google Maps Grounding</span>
-              <span className="sm:hidden">Ground</span>
+              Whispers
             </button>
-
-            {/* Drop Echo Button */}
             <button
+              onClick={() => setActiveFilter('history')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+                activeFilter === 'history'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                  : 'text-slate-400 hover:text-amber-300'
+              }`}
+            >
+              History
+            </button>
+            <button
+              onClick={() => setActiveFilter('shout')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+                activeFilter === 'shout'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                  : 'text-slate-400 hover:text-rose-300'
+              }`}
+            >
+              Colabs
+            </button>
+            <button
+              onClick={() => setActiveFilter('quest')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+                activeFilter === 'quest'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  : 'text-slate-400 hover:text-emerald-300'
+              }`}
+            >
+              Quests
+            </button>
+          </div>
+
+          {/* Right Zone: Primary Action (Drop Echo) & Clean Tools Dropdown */}
+          <div className="flex items-center gap-2">
+            {/* Primary CTA: Drop Echo */}
+            <button
+              id="tour-drop-echo"
               onClick={() => {
                 if (isDropMode) {
                   setIsDropMode(false);
@@ -449,120 +617,164 @@ export default function App() {
                   setIsDropModalOpen(true);
                 }
               }}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold shadow-lg shadow-cyan-500/20 backdrop-blur-xl transition-all hover:scale-105"
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold shadow-lg shadow-cyan-500/20 backdrop-blur-xl transition-all cursor-pointer hover:scale-102"
             >
               <Plus className="w-4 h-4 stroke-[3]" />
               <span>Drop Echo</span>
             </button>
+
+            {/* Tools Menu Dropdown */}
+            <div className="relative">
+              <button
+                id="tour-tools-menu"
+                onClick={() => {
+                  setIsToolsMenuOpen(!isToolsMenuOpen);
+                  setIsZoneMenuOpen(false);
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-white text-xs font-medium shadow-lg backdrop-blur-xl transition-all cursor-pointer"
+                title="Explore tools & analytics"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-slate-300" />
+                <span className="hidden sm:inline">Tools</span>
+                <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isToolsMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isToolsMenuOpen && (
+                <div className="absolute top-full right-0 mt-2 w-64 bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-2xl backdrop-blur-2xl p-2 z-[1050] animate-in fade-in slide-in-from-top-2">
+                  <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 border-b border-slate-800 mb-1">
+                    Map Tools & Features
+                  </div>
+
+                  {/* Echo Density & Resonance Histogram */}
+                  <button
+                    id="tour-density-radar"
+                    onClick={() => {
+                      setIsDensityModalOpen(true);
+                      soundSynth.playZoneAlertChime();
+                      setIsToolsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-2.5 py-2 rounded-xl text-xs flex items-center gap-2.5 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <BarChart2 className="w-4 h-4 text-purple-400 shrink-0" />
+                    <div>
+                      <div className="font-semibold text-white">Density & Resonance Radar</div>
+                      <div className="text-[10px] text-slate-400">Recharts histogram across zones</div>
+                    </div>
+                  </button>
+
+                  {/* Google Maps Grounding */}
+                  <button
+                    id="tour-maps-grounding"
+                    onClick={() => {
+                      setIsExploreModalOpen(true);
+                      setIsToolsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-2.5 py-2 rounded-xl text-xs flex items-center gap-2.5 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <Globe className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <div>
+                      <div className="font-semibold text-white">Google Maps Grounding</div>
+                      <div className="text-[10px] text-slate-400">Gemini landmark discovery</div>
+                    </div>
+                  </button>
+
+                  {/* Real Device GPS */}
+                  <button
+                    onClick={() => {
+                      handleGetDeviceGps();
+                      setIsToolsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-2.5 py-2 rounded-xl text-xs flex items-center gap-2.5 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <LocateFixed className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div>
+                      <div className="font-semibold text-white">Use My Real GPS</div>
+                      <div className="text-[10px] text-slate-400">Center to current device location</div>
+                    </div>
+                  </button>
+
+                  <div className="my-1 border-t border-slate-800" />
+
+                  {/* Interactive Tour */}
+                  <button
+                    onClick={() => {
+                      setIsOnboardingOpen(true);
+                      soundSynth.playZoneAlertChime();
+                      setIsToolsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-2.5 py-2 rounded-xl text-xs flex items-center gap-2.5 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <HelpCircle className="w-4 h-4 text-slate-400 shrink-0" />
+                    <div>
+                      <div className="font-medium">Interactive Feature Tour</div>
+                      <div className="text-[10px] text-slate-500">How to use Echoes</div>
+                    </div>
+                  </button>
+
+                  {/* Offline / Reconnect */}
+                  {connectionStatus !== 'connected' && (
+                    <button
+                      onClick={() => {
+                        fetchEchoes(true);
+                        setIsToolsMenuOpen(false);
+                      }}
+                      className="w-full text-left px-2.5 py-2 rounded-xl text-xs flex items-center gap-2.5 text-amber-300 hover:bg-amber-950/40 transition-colors cursor-pointer"
+                    >
+                      <RefreshCw className={`w-4 h-4 text-amber-400 shrink-0 ${isLoadingEchoes ? 'animate-spin' : ''}`} />
+                      <div>
+                        <div className="font-medium">Reconnect Data Grid</div>
+                        <div className="text-[10px] text-amber-500/80">Operating in offline cache mode</div>
+                      </div>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Teleport / Quick Zone Hopper & Layer Filter Bar */}
-        <div className="max-w-7xl mx-auto mt-2 flex flex-wrap items-center justify-between gap-2 pointer-events-auto">
-          {/* Layer Filters */}
-          <div className="flex items-center gap-1 bg-slate-900/85 border border-slate-800 p-1 rounded-xl shadow-lg backdrop-blur-xl overflow-x-auto no-scrollbar">
+        {/* Mobile Filter Bar (only visible on mobile screens) */}
+        <div className="md:hidden mt-2 pointer-events-auto flex items-center justify-center">
+          <div className="flex items-center gap-1 bg-slate-900/90 border border-slate-800/90 p-1 rounded-xl shadow-xl backdrop-blur-xl overflow-x-auto no-scrollbar">
             <button
               onClick={() => setActiveFilter('all')}
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                activeFilter === 'all'
-                  ? 'bg-slate-700 text-white shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
+              className={`px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer ${
+                activeFilter === 'all' ? 'bg-slate-800 text-white' : 'text-slate-400'
               }`}
             >
-              All ({echoes.length})
+              All
             </button>
-
             <button
               onClick={() => setActiveFilter('whisper')}
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors ${
-                activeFilter === 'whisper'
-                  ? 'bg-cyan-500 text-slate-950 font-bold shadow-xs'
-                  : 'text-cyan-400 hover:text-cyan-300'
+              className={`px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer ${
+                activeFilter === 'whisper' ? 'bg-cyan-500/20 text-cyan-300' : 'text-slate-400'
               }`}
             >
-              <span>🔒 Whispers</span>
-              <span className="text-[10px] opacity-80">
-                ({echoes.filter((e) => e.type === 'whisper').length})
-              </span>
+              Whispers
             </button>
-
             <button
               onClick={() => setActiveFilter('history')}
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors ${
-                activeFilter === 'history'
-                  ? 'bg-amber-400 text-slate-950 font-bold shadow-xs'
-                  : 'text-amber-400 hover:text-amber-300'
+              className={`px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer ${
+                activeFilter === 'history' ? 'bg-amber-500/20 text-amber-300' : 'text-slate-400'
               }`}
             >
-              <span>🏛️ History</span>
-              <span className="text-[10px] opacity-80">
-                ({echoes.filter((e) => e.type === 'history').length})
-              </span>
+              History
             </button>
-
             <button
               onClick={() => setActiveFilter('shout')}
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors ${
-                activeFilter === 'shout'
-                  ? 'bg-rose-500 text-slate-950 font-bold shadow-xs'
-                  : 'text-rose-400 hover:text-rose-300'
+              className={`px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer ${
+                activeFilter === 'shout' ? 'bg-rose-500/20 text-rose-300' : 'text-slate-400'
               }`}
             >
-              <span>📢 Colabs</span>
-              <span className="text-[10px] opacity-80">
-                ({echoes.filter((e) => e.type === 'shout').length})
-              </span>
+              Colabs
             </button>
-
             <button
               onClick={() => setActiveFilter('quest')}
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors ${
-                activeFilter === 'quest'
-                  ? 'bg-emerald-400 text-slate-950 font-bold shadow-xs'
-                  : 'text-emerald-400 hover:text-emerald-300'
+              className={`px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer ${
+                activeFilter === 'quest' ? 'bg-emerald-500/20 text-emerald-300' : 'text-slate-400'
               }`}
             >
-              <span>🎯 Quests</span>
-              <span className="text-[10px] opacity-80">
-                ({echoes.filter((e) => e.type === 'quest').length})
-              </span>
-            </button>
-          </div>
-
-          {/* Quick Zone Hopper */}
-          <div className="flex items-center gap-1 bg-slate-900/85 border border-slate-800 p-1 rounded-xl shadow-lg backdrop-blur-xl overflow-x-auto no-scrollbar">
-            <span className="text-[10px] font-bold uppercase text-slate-500 px-2 flex items-center gap-1">
-              <LocateFixed className="w-3 h-3 text-cyan-400" />
-              <span>Jump:</span>
-            </span>
-            {TELEPORT_ZONES.map((zone) => (
-              <button
-                key={zone.name}
-                onClick={() => handleTeleportToZone(zone)}
-                className={`px-2 py-0.5 rounded-lg text-[11px] font-medium transition-all whitespace-nowrap ${
-                  activeZoneName === zone.name
-                    ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title={`Simulate walking into ${zone.name}`}
-              >
-                {zone.name.replace('Springfield ', '').replace('Eugene ', '')}
-              </button>
-            ))}
-
-            {/* Reset zone notification quota button */}
-            <button
-              onClick={() => {
-                setZoneAlertCounts({});
-                soundSynth.playZoneAlertChime();
-                if (echoes.length > 0) {
-                  triggerZoneEvaluation(userLocation, activeZoneName);
-                }
-              }}
-              className="p-1 rounded-lg text-slate-400 hover:text-cyan-300 transition-colors ml-1"
-              title="Reset zone notification counts (test push alerts again)"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
+              Quests
             </button>
           </div>
         </div>
@@ -582,6 +794,17 @@ export default function App() {
           onMapClickForDrop={handleMapClickForDrop}
         />
       </main>
+
+      {/* Floating Map Controls (Bottom-Right GPS button) */}
+      <div className="absolute right-4 bottom-20 z-[900] pointer-events-auto">
+        <button
+          onClick={handleGetDeviceGps}
+          className="p-3 rounded-2xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-cyan-400 shadow-xl backdrop-blur-xl transition-all cursor-pointer hover:scale-105"
+          title="Center on my real GPS location"
+        >
+          <LocateFixed className="w-4 h-4" />
+        </button>
+      </div>
 
       {/* 3. PROXIMITY PUSH NOTIFICATION BANNER (First few times in area) */}
       {activeAlert && (
@@ -615,7 +838,7 @@ export default function App() {
 
       {/* 5. BOTTOM TIME-TRAVEL SLIDER WITH HISTORICAL VS CURRENT TOGGLE */}
       <footer className="absolute bottom-4 inset-x-0 z-[1000] px-3 sm:px-4 pointer-events-none">
-        <div className="pointer-events-auto">
+        <div id="tour-time-slider" className="pointer-events-auto">
           <TimeTravelSlider
             currentYear={timeSliderYear}
             onChangeYear={(year) => setTimeSliderYear(year)}
@@ -696,6 +919,27 @@ export default function App() {
           }}
         />
       )}
+
+      {/* 11. RECHARTS ECHO DENSITY & RESONANCE HISTOGRAM MODAL */}
+      <EchoDensityModal
+        isOpen={isDensityModalOpen}
+        onClose={() => setIsDensityModalOpen(false)}
+        echoes={echoes}
+        zones={TELEPORT_ZONES}
+        activeZoneName={activeZoneName}
+        onTeleportToZone={(zone) => {
+          handleTeleportToZone(zone);
+          soundSynth.playZoneAlertChime();
+        }}
+      />
+
+      {/* 12. INTERACTIVE ONBOARDING OVERLAY */}
+      <OnboardingOverlay
+        isOpen={isOnboardingOpen}
+        onClose={handleCloseOnboarding}
+        onAction={handleOnboardingAction}
+        isHistoricalMode={isHistoricalMode}
+      />
     </div>
   );
 }

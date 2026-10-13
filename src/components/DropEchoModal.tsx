@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { EchoType, EchoItem } from '../types';
 import { generateRandomKey, encryptWhisper } from '../utils/crypto';
+import { safeFetchJson } from '../utils/apiClient';
 import {
   X,
   MapPin,
@@ -73,7 +74,7 @@ export const DropEchoModal: React.FC<DropEchoModalProps> = ({
         encryptionSalt = encrypted.salt;
       }
 
-      const res = await fetch('/api/echoes', {
+      const result = await safeFetchJson<{ success: boolean; echo: EchoItem }>('/api/echoes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -101,20 +102,11 @@ export const DropEchoModal: React.FC<DropEchoModalProps> = ({
         }),
       });
 
-      const contentType = res.headers.get('content-type') || '';
-      let data: any;
-      if (contentType.includes('application/json')) {
-        data = await res.json();
-      } else {
-        const text = await res.text();
-        throw new Error(text.slice(0, 150) || 'Server returned an invalid response.');
-      }
-
-      if (res.ok && data.success && data.echo) {
-        onEchoCreated(data.echo);
+      if (result.ok && result.data?.success && result.data.echo) {
+        onEchoCreated(result.data.echo);
         onClose();
       } else {
-        setError(data.error || 'Failed to save Echo.');
+        setError(result.error || 'Failed to save Echo.');
       }
     } catch (err: any) {
       setError(err?.message || 'Network error occurred while saving.');

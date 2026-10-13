@@ -307,9 +307,28 @@ let echoesData: EchoItem[] = [
 
 // Routes
 
+// 0. Health check endpoint for connection verification
+app.get('/api/health', (_req, res) => {
+  res.json({
+    success: true,
+    status: 'online',
+    echoesCount: echoesData.length,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // 1. Get all echoes
-app.get('/api/echoes', (req, res) => {
+app.get('/api/echoes', (_req, res) => {
   res.json({ success: true, count: echoesData.length, echoes: echoesData });
+});
+
+// 1b. Get a single echo by ID
+app.get('/api/echoes/:id', (req, res) => {
+  const echo = echoesData.find((e) => e.id === req.params.id);
+  if (!echo) {
+    return res.status(404).json({ success: false, error: 'Echo not found' });
+  }
+  res.json({ success: true, echo });
 });
 
 // 2. Add an echo (Supports both Public Colabs and Encrypted Private Whispers)
@@ -337,11 +356,23 @@ app.post('/api/echoes', (req, res) => {
     zone,
     soundType,
     thenImageUrl,
-    nowImageUrl
+    nowImageUrl,
   } = req.body;
 
-  if (!title || !lat || !lng || !summary) {
-    return res.status(400).json({ error: 'Title, coordinates (lat, lng), and summary are required.' });
+  if (!title || lat === undefined || lng === undefined || !summary) {
+    return res.status(400).json({
+      success: false,
+      error: 'Title, coordinates (lat, lng), and summary are required.',
+    });
+  }
+
+  const parsedLat = Number(lat);
+  const parsedLng = Number(lng);
+  if (isNaN(parsedLat) || isNaN(parsedLng)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Latitude and longitude coordinates must be valid numbers.',
+    });
   }
 
   const newEcho: any = {
@@ -579,19 +610,46 @@ For each spot, provide:
   }
 });
 
-// Error handler for API routes to always return JSON and handle large payloads
-app.use('/api', (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error('API Error:', err);
-  if (err.type === 'entity.too.large') {
-    return res.status(413).json({
+// 404 Catch-All specifically for /api routes
+// Guarantees an API consumer NEVER receives Vite SPA HTML on missing or mistyped endpoints
+app.all('/api/*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+// Comprehensive error handler for all routes
+// Ensures JSON is always returned for API requests and handles payload limit / syntax errors gracefully
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Server error encountered:', err);
+
+  const isApi = req.originalUrl?.startsWith('/api') || req.path?.startsWith('/api');
+
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    const errorMsg = 'Uploaded photo or payload is too large. Please select an image under 20MB.';
+    if (isApi) {
+      return res.status(413).json({ success: false, error: errorMsg });
+    }
+    return res.status(413).type('application/json').send(JSON.stringify({ success: false, error: errorMsg }));
+  }
+
+  if (err instanceof SyntaxError && 'body' in err) {
+    const errorMsg = 'Malformed JSON in request payload.';
+    if (isApi) {
+      return res.status(400).json({ success: false, error: errorMsg });
+    }
+    return res.status(400).type('application/json').send(JSON.stringify({ success: false, error: errorMsg }));
+  }
+
+  if (isApi) {
+    return res.status(err.status || 500).json({
       success: false,
-      error: 'Uploaded photo is too large. Please select an image under 20MB.',
+      error: err.message || 'Internal server error processing API request',
     });
   }
-  res.status(err.status || 500).json({
-    success: false,
-    error: err.message || 'Server error processing request',
-  });
+
+  next(err);
 });
 
 // Configure Vite middleware in development or serve static in production

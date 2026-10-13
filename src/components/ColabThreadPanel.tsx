@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { EchoItem, ColabContribution } from '../types';
+import { safeFetchJson } from '../utils/apiClient';
 import {
   Upload,
   ArrowBigUp,
@@ -112,7 +113,11 @@ export const ColabThreadPanel: React.FC<ColabThreadPanelProps> = ({
     setUploadError(null);
 
     try {
-      const res = await fetch(`/api/echoes/${echo.id}/contribute`, {
+      const result = await safeFetchJson<{
+        success: boolean;
+        contribution: ColabContribution;
+        resonanceScore: number;
+      }>(`/api/echoes/${echo.id}/contribute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -123,23 +128,13 @@ export const ColabThreadPanel: React.FC<ColabThreadPanelProps> = ({
         }),
       });
 
-      const contentType = res.headers.get('content-type') || '';
-      let data: any;
-
-      if (contentType.includes('application/json')) {
-        data = await res.json();
-      } else {
-        const text = await res.text();
-        throw new Error(text.slice(0, 150) || 'Server returned an invalid response.');
-      }
-
-      if (res.ok && data.success && data.contribution) {
-        onContributionAdded(data.contribution, data.resonanceScore);
+      if (result.ok && result.data?.success && result.data.contribution) {
+        onContributionAdded(result.data.contribution, result.data.resonanceScore);
         setStoryText('');
         setImageUrl('');
         setIsAdding(false);
       } else {
-        setUploadError(data.error || 'Failed to submit contribution.');
+        setUploadError(result.error || 'Failed to submit contribution.');
       }
     } catch (err: any) {
       console.error('Failed to submit contribution:', err);

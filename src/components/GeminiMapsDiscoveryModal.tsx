@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { EchoItem } from '../types';
+import { safeFetchJson } from '../utils/apiClient';
 import {
   Sparkles,
   Search,
@@ -40,33 +41,39 @@ export const GeminiMapsDiscoveryModal: React.FC<GeminiMapsDiscoveryModalProps> =
     setGroundingSources([]);
     setFallbackPlaces([]);
 
-    try {
-      const res = await fetch('/api/gemini/maps-explore', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: q,
-          latitude: userLocation.lat,
-          longitude: userLocation.lng,
-          cityName: city,
-        }),
-      });
+    const result = await safeFetchJson<{
+      text?: string;
+      groundingSources?: Array<{ uri: string; title?: string }>;
+      places?: Array<any>;
+    }>('/api/gemini/maps-explore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: q,
+        latitude: userLocation.lat,
+        longitude: userLocation.lng,
+        cityName: city,
+      }),
+    });
 
-      const data = await res.json();
-      if (data.text) {
-        setResponseText(data.text);
+    setIsLoading(false);
+
+    if (result.ok && result.data) {
+      if (result.data.text) {
+        setResponseText(result.data.text);
       }
-      if (data.groundingSources && Array.isArray(data.groundingSources)) {
-        setGroundingSources(data.groundingSources);
+      if (result.data.groundingSources && Array.isArray(result.data.groundingSources)) {
+        setGroundingSources(result.data.groundingSources);
       }
-      if (data.places && Array.isArray(data.places)) {
-        setFallbackPlaces(data.places);
+      if (result.data.places && Array.isArray(result.data.places)) {
+        setFallbackPlaces(result.data.places);
       }
-    } catch (e) {
-      console.error('Grounding search failed:', e);
-      setResponseText('Error connecting to Maps Grounding service. Please check network connection.');
-    } finally {
-      setIsLoading(false);
+    } else {
+      console.warn('Grounding search error:', result.error);
+      setResponseText(
+        result.error ||
+          'Error connecting to Maps Grounding service. Please check network connection.'
+      );
     }
   };
 
