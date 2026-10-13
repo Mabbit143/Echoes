@@ -1,0 +1,6 @@
+{
+  "name": "Echoes: The Human Map",
+  "description": "Discover hyper-local history, unearth secret whispers, and explore interactive resonance quests with archival time-travel overlays and Google Maps grounding.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
