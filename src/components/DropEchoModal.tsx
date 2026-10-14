@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { EchoType, EchoItem } from '../types';
 import { generateRandomKey, encryptWhisper } from '../utils/crypto';
 import { safeFetchJson } from '../utils/apiClient';
+import { loadUserProfile } from '../utils/userProfile';
 import {
   X,
   MapPin,
@@ -32,7 +33,7 @@ export const DropEchoModal: React.FC<DropEchoModalProps> = ({
   const [title, setTitle] = useState('');
   const [summary, setSummary] = useState('');
   const [fullStory, setFullStory] = useState('');
-  const [author, setAuthor] = useState('');
+  const [author, setAuthor] = useState(() => loadUserProfile().username || 'Springfield Traveler');
   const [zone, setZone] = useState('Downtown Springfield');
   const [year, setYear] = useState<number>(2024);
   const [isLockedWhisper, setIsLockedWhisper] = useState(false);

@@ -14,6 +14,8 @@ import { EchoDensityModal } from './components/EchoDensityModal';
 import { soundSynth } from './utils/audioSynth';
 import { DEFAULT_ECHOES } from './data/defaultEchoes';
 import { safeFetchJson } from './utils/apiClient';
+import { UserProfileModal } from './components/UserProfileModal';
+import { loadUserProfile, recordEchoDrop, recordCommunityVoteBonus, QuestStep } from './utils/userProfile';
 import {
   Radio,
   Plus,
@@ -31,6 +33,8 @@ import {
   HelpCircle,
   BarChart2,
   ChevronDown,
+  User,
+  Trophy,
 } from 'lucide-react';
 
 const MAX_NOTIFICATIONS_PER_ZONE = 3;
@@ -83,9 +87,22 @@ export default function App() {
   });
   const [isExploreModalOpen, setIsExploreModalOpen] = useState<boolean>(false);
   const [isDensityModalOpen, setIsDensityModalOpen] = useState<boolean>(false);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState<boolean>(false);
+  const [userProfile, setUserProfile] = useState(() => loadUserProfile());
   const [isZoneMenuOpen, setIsZoneMenuOpen] = useState<boolean>(false);
   const [isToolsMenuOpen, setIsToolsMenuOpen] = useState<boolean>(false);
   const [activeAlert, setActiveAlert] = useState<ProximityAlert | null>(null);
+
+  // Sync profile when updated
+  useEffect(() => {
+    const handleProfileUpdate = (e: any) => {
+      if (e.detail) {
+        setUserProfile(e.detail);
+      }
+    };
+    window.addEventListener('echoes-profile-updated', handleProfileUpdate);
+    return () => window.removeEventListener('echoes-profile-updated', handleProfileUpdate);
+  }, []);
 
   // Whisper Engine: Invitation states
   const [whisperInviteEcho, setWhisperInviteEcho] = useState<EchoItem | null>(null);
@@ -604,8 +621,32 @@ export default function App() {
             </button>
           </div>
 
-          {/* Right Zone: Primary Action (Drop Echo) & Clean Tools Dropdown */}
+          {/* Right Zone: Profile, Primary Action (Drop Echo) & Clean Tools Dropdown */}
           <div className="flex items-center gap-2">
+            {/* User Profile & Resonance Badge Button */}
+            <button
+              id="tour-user-profile"
+              onClick={() => {
+                setIsProfileModalOpen(true);
+                soundSynth.playZoneAlertChime();
+                setIsZoneMenuOpen(false);
+                setIsToolsMenuOpen(false);
+              }}
+              className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-xs font-semibold shadow-lg backdrop-blur-xl transition-all cursor-pointer hover:border-cyan-500/50 group"
+              title="View Explorer Profile, Dropped Echoes, Quests & Resonance History"
+            >
+              <div className="w-5 h-5 rounded-lg bg-cyan-950 border border-cyan-800 flex items-center justify-center text-cyan-300">
+                <User className="w-3 h-3 text-cyan-400 group-hover:scale-110 transition-transform" />
+              </div>
+              <span className="text-white font-medium hidden md:inline max-w-[100px] truncate">
+                {userProfile.username}
+              </span>
+              <span className="px-1.5 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 text-[10px] font-mono font-bold flex items-center gap-0.5">
+                <Sparkles className="w-2.5 h-2.5 text-cyan-400" />
+                {userProfile.resonanceScore}
+              </span>
+            </button>
+
             {/* Primary CTA: Drop Echo */}
             <button
               id="tour-drop-echo"
@@ -644,6 +685,22 @@ export default function App() {
                   <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 border-b border-slate-800 mb-1">
                     Map Tools & Features
                   </div>
+
+                  {/* User Profile & Quests */}
+                  <button
+                    onClick={() => {
+                      setIsProfileModalOpen(true);
+                      soundSynth.playZoneAlertChime();
+                      setIsToolsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-2.5 py-2 rounded-xl text-xs flex items-center gap-2.5 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <User className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <div>
+                      <div className="font-semibold text-white">Explorer Profile & Quests</div>
+                      <div className="text-[10px] text-slate-400">Echoes, active quests & resonance history</div>
+                    </div>
+                  </button>
 
                   {/* Echo Density & Resonance Histogram */}
                   <button
@@ -902,6 +959,7 @@ export default function App() {
           onEchoCreated={(newEcho) => {
             setEchoes((prev) => [newEcho, ...prev]);
             setSelectedEcho(newEcho);
+            recordEchoDrop(newEcho);
             soundSynth.playZoneAlertChime();
           }}
         />
@@ -915,6 +973,7 @@ export default function App() {
           onAddEchoToMap={(newEcho) => {
             setEchoes((prev) => [newEcho, ...prev]);
             setSelectedEcho(newEcho);
+            recordEchoDrop(newEcho);
             soundSynth.playZoneAlertChime();
           }}
         />
@@ -939,6 +998,49 @@ export default function App() {
         onClose={handleCloseOnboarding}
         onAction={handleOnboardingAction}
         isHistoricalMode={isHistoricalMode}
+      />
+
+      {/* 13. USER PROFILE & QUESTS MODAL */}
+      <UserProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
+        echoes={echoes}
+        userLocation={userLocation}
+        onTeleportToEcho={(echo) => {
+          setUserLocation({ lat: echo.lat, lng: echo.lng });
+          setSelectedEcho(echo);
+          soundSynth.playZoneAlertChime();
+        }}
+        onOpenEchoDrawer={(echo) => setSelectedEcho(echo)}
+        onTrackQuestWaypoint={(step: QuestStep) => {
+          const matchingEcho = echoes.find((e) => e.id === step.echoId);
+          if (matchingEcho) {
+            setRadarTargetEcho(matchingEcho);
+          } else {
+            setRadarTargetEcho({
+              id: `quest-${step.stepNumber}`,
+              title: step.title,
+              type: 'quest',
+              lat: step.lat,
+              lng: step.lng,
+              author: 'Quest Master',
+              distanceThresholdMeters: 30,
+              summary: step.summary,
+              fullStory: step.hint,
+              tags: ['Active Quest', step.zone],
+              resonanceScore: 100,
+              zone: step.zone,
+              createdAt: new Date().toISOString(),
+            });
+          }
+          // Set user position slightly nearby so the radar displays bearing and distance
+          setUserLocation({ lat: step.lat - 0.0004, lng: step.lng - 0.0004 });
+          soundSynth.playZoneAlertChime();
+        }}
+        onOpenDropModal={() => {
+          setDropCoordinates(userLocation);
+          setIsDropModalOpen(true);
+        }}
       />
     </div>
   );
